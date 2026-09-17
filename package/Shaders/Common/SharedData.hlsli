@@ -380,7 +380,8 @@ namespace SharedData
 		uint FieldValid;       // 1 when a field texture is bound for the active worldspace
 		float FieldBathyRange; // world units represented by a stored bathymetry of 0.5
 		uint TessellationActive;  // 1 when water draws are being tessellated this frame
-		float3 pad1;
+		float PreviousTimer;      // SharedData::Timer of the previous frame, for stencil-pass motion vectors
+		float2 pad1;
 	};
 
 	cbuffer FeatureData : register(b6)

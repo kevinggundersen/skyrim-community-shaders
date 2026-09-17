@@ -325,9 +325,16 @@ float ShoreVertexTessFactor(float3 waterPositionWS)
 ShoreHullConstants ShoreWavesPatchConstants(InputPatch<VS_OUTPUT, 3> patch)
 {
 	ShoreHullConstants c;
+	// The stencil technique names its camera-relative position differently.
+#		if defined(STENCIL)
+	float f0 = ShoreVertexTessFactor(patch[0].WorldPosition.xyz);
+	float f1 = ShoreVertexTessFactor(patch[1].WorldPosition.xyz);
+	float f2 = ShoreVertexTessFactor(patch[2].WorldPosition.xyz);
+#		else
 	float f0 = ShoreVertexTessFactor(patch[0].WPosition.xyz);
 	float f1 = ShoreVertexTessFactor(patch[1].WPosition.xyz);
 	float f2 = ShoreVertexTessFactor(patch[2].WPosition.xyz);
+#		endif
 	// Edge i is opposite control point i; taking the max of its two endpoints keeps shared edges
 	// identical between neighbouring patches.
 	c.edges[0] = max(f1, f2);
@@ -365,24 +372,47 @@ VS_OUTPUT main(ShoreHullConstants constants, float3 bary : SV_DomainLocation, co
 {
 	VS_OUTPUT o = (VS_OUTPUT)0;
 #		define SHORE_INTERP(field) o.field = patch[0].field * bary.x + patch[1].field * bary.y + patch[2].field * bary.z
+	float scaleZ = max(length(float3(World[0][2], World[1][2], World[2][2])), 1e-4);
+
+#		if defined(STENCIL)
+	// Stencil technique: water mask and motion vectors. It must be displaced exactly like the
+	// visible surface, with the previous frame's height on the previous position, or TAA
+	// reprojects every lifted crest from the flat plane and the surface smears with the camera.
+	SHORE_INTERP(HPosition);
+	SHORE_INTERP(WorldPosition);
+	SHORE_INTERP(PreviousWorldPosition);
+	o.NormalsScale = patch[0].NormalsScale;
+
+	float2 worldXY = o.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy;
+	ShoreWaves::FieldSample f = ShoreWaves::SampleShoreField(ShoreFieldTessTex, ShoreFieldTessSampler, worldXY);
+	ShoreWaves::WaveData w = ShoreWaves::EvaluateWaves(f, worldXY, SharedData::Timer);
+	float h = w.active > 0.5 ? w.height : 0.0;
+	float previousTimer = SharedData::shoreWavesSettings.PreviousTimer > 0.0 ? SharedData::shoreWavesSettings.PreviousTimer : SharedData::Timer;
+	ShoreWaves::WaveData wPrev = ShoreWaves::EvaluateWaves(f, worldXY, previousTimer);
+	float hPrev = wPrev.active > 0.5 ? wPrev.height : 0.0;
+
+	o.WorldPosition.z += h;
+	o.PreviousWorldPosition.z += hPrev;
+	// Projection is affine, so a model-space delta projects as a delta.
+	o.HPosition += mul(WorldViewProj, float4(0.0, 0.0, h / scaleZ, 0.0));
+#		else
 	SHORE_INTERP(HPosition);
 	SHORE_INTERP(WPosition);
 	SHORE_INTERP(TexCoord1);
 	SHORE_INTERP(TexCoord2);
-#		if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP))
+#			if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP))
 	SHORE_INTERP(TexCoord3);
-#		endif
-#		if defined(FLOWMAP)
+#			endif
+#			if defined(FLOWMAP)
 	o.TexCoord4 = patch[0].TexCoord4;
-#		endif
-#		if NUM_SPECULAR_LIGHTS == 0
+#			endif
+#			if NUM_SPECULAR_LIGHTS == 0
 	SHORE_INTERP(MPosition);
-#		endif
-#		if !defined(UNIFIED_WATER)
+#			endif
+#			if !defined(UNIFIED_WATER)
 	SHORE_INTERP(FogParam);
-#		endif
+#			endif
 	o.NormalsScale = patch[0].NormalsScale;
-#		undef SHORE_INTERP
 
 	// Displace along world Z by the wave height. WPosition is camera-relative world space;
 	// MPosition is model space, so the same offset is divided by the model's Z scale before
@@ -393,32 +423,35 @@ VS_OUTPUT main(ShoreHullConstants constants, float3 bary : SV_DomainLocation, co
 	ShoreWaves::WaveData w = ShoreWaves::EvaluateWaves(f, worldXY, SharedData::Timer);
 	float h = w.active > 0.5 ? w.height : 0.0;
 
-#		if !defined(FLOWMAP)
-	// Diagnostics for the pixel shader's tessellation debug views: the height this stage applied
-	// and a coarse encoding of the world XY it evaluated at (x in the fraction, y in the units).
-	o.TexCoord2.z = h;
-	o.TexCoord2.w = frac(worldXY.x / 1024.0) + 2.0 * frac(worldXY.y / 1024.0);
-#		endif
+#			if !defined(FLOWMAP)
+	// Diagnostics for the pixel shader's tessellation debug view: the world XY this stage
+	// evaluated at. Linear, so it interpolates correctly across the triangle.
+	o.TexCoord2.zw = worldXY;
+#			endif
 
 	o.WPosition.z += h;
 	o.WPosition.w = length(o.WPosition.xyz);
 
-	float scaleZ = max(length(float3(World[0][2], World[1][2], World[2][2])), 1e-4);
 	float4 modelPosition = float4(o.MPosition.xyz + float3(0.0, 0.0, h / scaleZ), 1.0);
-#		if NUM_SPECULAR_LIGHTS == 0
+#			if NUM_SPECULAR_LIGHTS == 0
 	// The pixel shader projects MPosition through TextureProj to find the refraction sample. It
 	// must be the displaced position, or the seabed seen through a lifted crest lands at the
-	// pixel of the flat surface and slides with the camera.
+	// pixel of the flat surface.
 	o.MPosition = modelPosition;
-#		endif
+#			endif
 	float4 worldViewPos = mul(WorldViewProj, modelPosition);
 	float heightMult = min((1.0 / 10000.0) * max(worldViewPos.z - 70000, 0), 1);
 	o.HPosition.xy = worldViewPos.xy;
 	o.HPosition.z = heightMult * 0.5 + worldViewPos.z;
 	o.HPosition.w = worldViewPos.w;
-#		if defined(HORIZON_FIX)
+#			if defined(HORIZON_FIX)
 	o.HPosition.z = min(o.HPosition.z, o.HPosition.w * HorizonFix::FoldedDepth);
+#			endif
 #		endif
+
+	// Diagnostics: the pixel shader never reads NormalsScale.w, so carry the subdivision factor.
+	o.NormalsScale.w = constants.inside;
+#		undef SHORE_INTERP
 	return o;
 }
 #	endif
@@ -1466,7 +1499,7 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif
 #			if defined(SHORE_WAVES_ACTIVE)
 	if (SharedData::shoreWavesSettings.Enabled && SharedData::shoreWavesSettings.DebugMode != 0)
-		finalColor = ShoreWaves::DebugColor(shoreData, input.TexCoord2.z, input.TexCoord2.w, input.WPosition.xy + FrameBuffer::CameraPosAdjust.xy);
+		finalColor = ShoreWaves::DebugColor(shoreData, input.TexCoord2.zw, input.NormalsScale.w, input.WPosition.xy + FrameBuffer::CameraPosAdjust.xy);
 #			endif
 	psout.Lighting = float4(finalColor, isSpecular);
 #		endif

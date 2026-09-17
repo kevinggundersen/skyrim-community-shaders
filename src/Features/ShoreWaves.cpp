@@ -220,7 +220,7 @@ void ShoreWaves::DrawSettings()
 		T(TKEY("debug_wave_height"), "Wave: height"),
 		T(TKEY("debug_wave_breaking"), "Wave: breaking"),
 		T(TKEY("debug_foam_mask"), "Foam: mask"),
-		T(TKEY("debug_tess_height"), "Tess: domain height vs pixel height"),
+		T(TKEY("debug_tess_factor"), "Tess: subdivision factor"),
 		T(TKEY("debug_tess_world"), "Tess: domain world XY vs pixel"),
 	};
 	int debugMode = static_cast<int>(settings.DebugMode);
@@ -235,7 +235,7 @@ void ShoreWaves::DrawSettings()
 							  "Field distance: same ramp over 0..2048 units on the water side, brown on land, magenta = no data.\n"
 							  "Wave height: grey = flat, white = crest, black = trough. Breaking: red where crests are at the breaking limit.\n"
 							  "Foam mask: white where foam would be drawn before the texture is applied.\n"
-							  "Tess height: grey ramp of the displaced height, red where it disagrees with the pixel shader's.\n"
+							  "Tess factor: grey ramp of the patch subdivision factor, white = 64, black = none.\n"
 							  "Tess world XY: checkerboards from both stages; yellow/black = agree, pure red or green = disagree."));
 	}
 }
@@ -282,6 +282,7 @@ ShoreWaves::PerFrame ShoreWaves::GetCommonBufferData() const
 		data.FieldBathyRange = ShoreField::kBathyRange;
 	}
 	data.TessellationActive = IsTessellationActive() ? 1u : 0u;
+	data.PreviousTimer = previousTimer;
 	return data;
 }
 
@@ -369,12 +370,14 @@ void ShoreWaves::BSWaterShader_SetupGeometry::thunk(RE::BSShader* shader, RE::BS
 		const uint32_t descriptor = globals::state->modifiedVertexDescriptor;
 		const uint32_t technique = (descriptor >> 11) & 0xF;
 		const bool mainTechnique = technique == 0;  // SPECULAR with no point lights: the normal water pass
+		const bool stencilTechnique = technique == static_cast<uint32_t>(SIE::ShaderCache::WaterShaderTechniques::Stencil);  // water mask + motion vectors
 		const bool hasDepth = descriptor & static_cast<uint32_t>(Flags::Depth);
 		const bool fakeDepth = descriptor & static_cast<uint32_t>(Flags::VertexAlphaDepth);
 		const bool flowmap = descriptor & static_cast<uint32_t>(Flags::Flowmap);
 		const bool interior = descriptor & static_cast<uint32_t>(Flags::Interior);
 
-		if (mainTechnique && hasDepth && !fakeDepth && !flowmap && !interior) {
+		const bool eligible = (mainTechnique && hasDepth && !fakeDepth) || stencilTechnique;
+		if (eligible && !flowmap && !interior) {
 			const auto& bound = pass->geometry->worldBound;
 			const float distance = bound.center.GetDistance(Util::GetEyePosition()) - bound.radius;
 			if (distance < self.settings.TessDistance) {
@@ -446,6 +449,13 @@ void ShoreWaves::Prepass()
 	tessellatedDrawsShown = tessellatedDraws;
 	tessellatedDraws = 0;
 	pendingTessellation = false;
+
+	// Stencil-pass motion vectors need the height the previous frame used.
+	const float timer = globals::state->timer;
+	if (timer != lastSeenTimer) {
+		previousTimer = lastSeenTimer;
+		lastSeenTimer = timer;
+	}
 
 	auto context = globals::d3d::context;
 	ID3D11ShaderResourceView* srvs[2] = { shoreField.GetSRV(), foamView.get() };

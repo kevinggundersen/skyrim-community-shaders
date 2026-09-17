@@ -61,7 +61,7 @@ struct ShoreWaves : Feature
 		WaveHeight = 7,
 		WaveBreaking = 8,
 		FoamMask = 9,
-		TessHeight = 10,
+		TessFactor = 10,
 		TessWorld = 11,
 	};
 
@@ -106,7 +106,8 @@ struct ShoreWaves : Feature
 		uint32_t FieldValid;   // 1 when a field texture is bound for the active worldspace
 		float FieldBathyRange; // world units represented by a stored bathymetry of 0.5
 		uint32_t TessellationActive;  // 1 when water draws are being tessellated this frame
-		float pad1[3];
+		float PreviousTimer;          // shared Timer of the previous frame, for stencil-pass motion vectors
+		float pad1[2];
 	};
 	STATIC_ASSERT_ALIGNAS_16(PerFrame);
 
@@ -131,6 +132,8 @@ struct ShoreWaves : Feature
 	uint32_t tessellatedDraws = 0;       // this frame
 	uint32_t tessellatedDrawsShown = 0;  // last frame, for the panel
 	bool drawHookInstalled = false;
+	float previousTimer = 0.0f;  // shared Timer value the previous frame rendered with
+	float lastSeenTimer = 0.0f;
 
 	/** @brief Loads the tiling foam texture, creates the field sampler, installs the draw hook. */
 	virtual void SetupResources() override;
