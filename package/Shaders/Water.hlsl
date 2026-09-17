@@ -603,6 +603,7 @@ FlowmapData GetFlowmapDataWorldSpace(FlowmapData textureSpaceData)
 #			if defined(LOD)
 #				undef WATER_EFFECTS
 #				undef WETNESS_EFFECTS
+#				undef SHORE_WAVES
 #			endif
 
 #			if defined(WATER_EFFECTS) && !defined(VC)
@@ -616,6 +617,13 @@ FlowmapData GetFlowmapDataWorldSpace(FlowmapData textureSpaceData)
 
 #			if defined(WETNESS_EFFECTS)
 #				include "WetnessEffects/WetnessEffects.hlsli"
+#			endif
+
+// Shore Waves needs the real scene depth behind the water: only the DEPTH permutations that read
+// the depth buffer (not the vertex-alpha fake), and only from above the surface.
+#			if defined(SHORE_WAVES) && defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH) && !defined(UNDERWATER)
+#				define SHORE_WAVES_ACTIVE
+#				include "ShoreWaves/ShoreWaves.hlsli"
 #			endif
 
 // Structure to return both normal and ripple/splash color information
@@ -634,6 +642,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 
 #			if defined(WATER_PARALLAX)
 	float2 parallaxOffset = WaterEffects::GetParallaxOffset(input, normalScalesRcp);
+#				if defined(SHORE_WAVES_ACTIVE)
+	parallaxOffset += ShoreWaves::g_waveParallaxOffset;
+#				endif
+#			elif defined(SHORE_WAVES_ACTIVE)
+	float2 parallaxOffset = ShoreWaves::g_waveParallaxOffset;
 #			endif
 
 #			if defined(FLOWMAP)
@@ -691,7 +704,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			endif  // End of FLOWMAP block
 
 #			if !defined(FLOWMAP)
-#				if defined(WATER_PARALLAX)
+#				if defined(WATER_PARALLAX) || defined(SHORE_WAVES_ACTIVE)
 	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + parallaxOffset.xy * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
 #				else
 	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
@@ -707,7 +720,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				endif
 #			elif !defined(LOD)
 
-#				if defined(WATER_PARALLAX)
+#				if defined(WATER_PARALLAX) || defined(SHORE_WAVES_ACTIVE)
 	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw + parallaxOffset.xy * normalScalesRcp.y, SharedData::MipBias).xyz * 2.0 - 1.0;
 	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy + parallaxOffset.xy * normalScalesRcp.z, SharedData::MipBias).xyz * 2.0 - 1.0;
 #				else
@@ -734,6 +747,10 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 		normalize(float3(0, 0, 1) + NormalsAmplitude.xxx * normals1);
 #			endif
 
+#			if defined(SHORE_WAVES_ACTIVE) && !defined(FLOWMAP)
+	finalNormal = ShoreWaves::ApplyWaveNormal(finalNormal);
+#			endif
+
 #			if defined(WADING)
 #				if defined(FLOWMAP)
 	float2 displacementUv = input.TexCoord3.zw;
@@ -757,7 +774,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 		(rainDropDistance < maxRainDropDistance) && wetnessOcclusion > 0.05) {
 		float rippleStrengthModifier = (wetnessOcclusion * wetnessOcclusion) * distanceFadeout;
 		float3 rippleWPosition = input.WPosition.xyz + finalNormal * 16;
-#				if defined(WATER_PARALLAX)
+#				if defined(WATER_PARALLAX) || defined(SHORE_WAVES_ACTIVE)
 		rippleWPosition.xy += parallaxOffset;
 #				endif
 #				if defined(FLOWMAP)
@@ -1026,6 +1043,12 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 #			endif
 
+#			if defined(SHORE_WAVES_ACTIVE)
+	// Uniform control flow here: EstimateShoreDirection uses screen derivatives.
+	ShoreWaves::ShoreData shoreData = ShoreWaves::GetShoreData(input.WPosition.xyz, screenPosition, depthOffset);
+	ShoreWaves::PrepareWaveSurface(shoreData, input.WPosition.xyz);
+#			endif
+
 #			if defined(UNDERWATER)
 	float4 depthControl = float4(0, 1, 1, 0);
 #			elif defined(LOD)
@@ -1119,6 +1142,14 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 
 	diffuseOutput.refractionDiffuseColor = dirColor + ambientColor;
+
+#				if defined(SHORE_WAVES_ACTIVE)
+#					if defined(SKYLIGHTING)
+	float shoreFoamAmbientVisibility = skylightingDiffuse;
+#					else
+	float shoreFoamAmbientVisibility = 1.0;
+#					endif
+#				endif
 
 	float3 diffuseColor = lerp(diffuseOutput.refractionColor, diffuseOutput.refractionDiffuseColor, diffuseOutput.refractionMul);
 
@@ -1221,6 +1252,10 @@ PS_OUTPUT main(PS_INPUT input)
 #						endif
 
 	float3 finalColor = finalColorPreFog;
+#						if defined(SHORE_WAVES_ACTIVE)
+	finalColor = ShoreWaves::ApplyCrestColor(finalColor, viewDirection, Color::Water(ShallowColor.xyz));
+	finalColor = ShoreWaves::ApplyFoam(finalColor, shoreData, normal, viewDirection, dirShadow * surfaceShadow, shoreFoamAmbientVisibility, fogColor, fogDistanceFactor);
+#						endif
 
 #						if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization
@@ -1289,6 +1324,10 @@ PS_OUTPUT main(PS_INPUT input)
 	refractionColor = lerp(refractionColor, fogColor, Color::FogAlpha(fogFactor));
 
 	float3 finalColor = lerp(refractionColor, finalColorPreFog, diffuseOutput.refractionMul);
+#						if defined(SHORE_WAVES_ACTIVE)
+	finalColor = ShoreWaves::ApplyCrestColor(finalColor, viewDirection, Color::Water(ShallowColor.xyz));
+	finalColor = ShoreWaves::ApplyFoam(finalColor, shoreData, normal, viewDirection, dirShadow * surfaceShadow, shoreFoamAmbientVisibility, preFogColor, fogDistanceFactor);
+#						endif
 #						if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override water color with debug visualization
 	float3 debugColor = WetnessEffects::GetDebugWetnessColorStandard(waterData.rippleInfo, 2.0, 3.0);
@@ -1299,6 +1338,10 @@ PS_OUTPUT main(PS_INPUT input)
 #					endif
 
 #				endif
+#			endif
+#			if defined(SHORE_WAVES_ACTIVE)
+	if (SharedData::shoreWavesSettings.Enabled && SharedData::shoreWavesSettings.DebugMode != 0)
+		finalColor = ShoreWaves::DebugColor(shoreData);
 #			endif
 	psout.Lighting = float4(finalColor, isSpecular);
 #		endif

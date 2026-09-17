@@ -346,6 +346,39 @@ namespace SharedData
 		float4 wetParams;
 	};
 
+	/** @brief Shore Waves feature settings (see src/Features/ShoreWaves.h). */
+	struct ShoreWavesSettings
+	{
+		uint Enabled;
+		uint DebugMode;  // see ShoreWaves::DebugMode in ShoreWaves.h
+		float MaxDepth;  // bathymetry depth (game units) at which shore effects have faded out
+		float Intensity;
+		float WavePeriod;      // seconds
+		float WaveAmplitude;   // units at RefDepth (half of crest-to-trough height)
+		float WaveSharpness;   // exponent on the crest profile, >= 1
+		float RefDepth;        // depth at which WaveAmplitude applies (Green's law reference)
+		float MinDepth;        // shallowest depth used for wave speed
+		float NoiseStrength;   // along-shore phase wobble, in wave periods
+		float NoiseScale;      // 1 / world units for the wobble noise
+		float ParallaxScale;
+		float NormalStrength;
+		uint WaveTrains;       // 1..3 summed trains
+		float FoamAmount;      // multiplier on wave-driven foam
+		float FoamScale;       // world units per foam texture tile
+		float FoamDecay;       // seconds for wash behind a crest to fade
+		float ShoreFoamWidth;  // screen-depth band (units) of the waterline foam
+		float FoamSoftness;    // threshold softness of the foam pattern
+		float FoamBrightness;  // foam albedo multiplier
+		float CrestGlow;       // crest translucency strength
+		float3 pad0;
+		float2 FieldOrigin;    // world XY of the min corner of field texel (0, 0)
+		float2 FieldSize;      // field dimensions in texels
+		float FieldTexelSize;  // world units per texel
+		float FieldMaxRange;   // world units represented by a stored distance of 1.0
+		uint FieldValid;       // 1 when a field texture is bound for the active worldspace
+		float FieldBathyRange; // world units represented by a stored bathymetry of 0.5
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -367,6 +400,7 @@ namespace SharedData
 		ExponentialHeightFogSettings exponentialHeightFogSettings;
 		TruePBRSettings truePBRSettings;
 		SkinData skinData;
+		ShoreWavesSettings shoreWavesSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

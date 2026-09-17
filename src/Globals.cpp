@@ -36,6 +36,7 @@
 #include "Features/Upscaling.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricShadows.h"
+#include "Features/ShoreWaves.h"
 #include "Features/WaterEffects.h"
 #include "Features/CSEditor.h"
 #include "Features/WetnessEffects.h"
@@ -83,6 +84,7 @@ namespace globals
 		TerrainShadows terrainShadows{};
 		UnifiedWater unifiedWater{};
 		VolumetricLighting volumetricLighting{};
+		ShoreWaves shoreWaves{};
 		WaterEffects waterEffects{};
 		PerformanceOverlay performanceOverlay{};
 		WetnessEffects wetnessEffects{};
