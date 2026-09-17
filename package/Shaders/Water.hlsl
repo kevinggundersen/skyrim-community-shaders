@@ -393,11 +393,24 @@ VS_OUTPUT main(ShoreHullConstants constants, float3 bary : SV_DomainLocation, co
 	ShoreWaves::WaveData w = ShoreWaves::EvaluateWaves(f, worldXY, SharedData::Timer);
 	float h = w.active > 0.5 ? w.height : 0.0;
 
+#		if !defined(FLOWMAP)
+	// Diagnostics for the pixel shader's tessellation debug views: the height this stage applied
+	// and a coarse encoding of the world XY it evaluated at (x in the fraction, y in the units).
+	o.TexCoord2.z = h;
+	o.TexCoord2.w = frac(worldXY.x / 1024.0) + 2.0 * frac(worldXY.y / 1024.0);
+#		endif
+
 	o.WPosition.z += h;
 	o.WPosition.w = length(o.WPosition.xyz);
 
 	float scaleZ = max(length(float3(World[0][2], World[1][2], World[2][2])), 1e-4);
 	float4 modelPosition = float4(o.MPosition.xyz + float3(0.0, 0.0, h / scaleZ), 1.0);
+#		if NUM_SPECULAR_LIGHTS == 0
+	// The pixel shader projects MPosition through TextureProj to find the refraction sample. It
+	// must be the displaced position, or the seabed seen through a lifted crest lands at the
+	// pixel of the flat surface and slides with the camera.
+	o.MPosition = modelPosition;
+#		endif
 	float4 worldViewPos = mul(WorldViewProj, modelPosition);
 	float heightMult = min((1.0 / 10000.0) * max(worldViewPos.z - 70000, 0), 1);
 	o.HPosition.xy = worldViewPos.xy;
@@ -1453,7 +1466,7 @@ PS_OUTPUT main(PS_INPUT input)
 #			endif
 #			if defined(SHORE_WAVES_ACTIVE)
 	if (SharedData::shoreWavesSettings.Enabled && SharedData::shoreWavesSettings.DebugMode != 0)
-		finalColor = ShoreWaves::DebugColor(shoreData);
+		finalColor = ShoreWaves::DebugColor(shoreData, input.TexCoord2.z, input.TexCoord2.w, input.WPosition.xy + FrameBuffer::CameraPosAdjust.xy);
 #			endif
 	psout.Lighting = float4(finalColor, isSpecular);
 #		endif

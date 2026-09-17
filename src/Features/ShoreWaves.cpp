@@ -220,6 +220,8 @@ void ShoreWaves::DrawSettings()
 		T(TKEY("debug_wave_height"), "Wave: height"),
 		T(TKEY("debug_wave_breaking"), "Wave: breaking"),
 		T(TKEY("debug_foam_mask"), "Foam: mask"),
+		T(TKEY("debug_tess_height"), "Tess: domain height vs pixel height"),
+		T(TKEY("debug_tess_world"), "Tess: domain world XY vs pixel"),
 	};
 	int debugMode = static_cast<int>(settings.DebugMode);
 	if (ImGui::Combo(T(TKEY("debug_mode"), "Debug View"), &debugMode, debugModes, IM_ARRAYSIZE(debugModes))) {
@@ -232,7 +234,9 @@ void ShoreWaves::DrawSettings()
 							  "(red = +X east, green = +Y north, cyan = -X, purple = -Y); grey where undefined.\n"
 							  "Field distance: same ramp over 0..2048 units on the water side, brown on land, magenta = no data.\n"
 							  "Wave height: grey = flat, white = crest, black = trough. Breaking: red where crests are at the breaking limit.\n"
-							  "Foam mask: white where foam would be drawn before the texture is applied."));
+							  "Foam mask: white where foam would be drawn before the texture is applied.\n"
+							  "Tess height: grey ramp of the displaced height, red where it disagrees with the pixel shader's.\n"
+							  "Tess world XY: checkerboards from both stages; yellow/black = agree, pure red or green = disagree."));
 	}
 }
 

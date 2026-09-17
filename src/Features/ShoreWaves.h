@@ -61,6 +61,8 @@ struct ShoreWaves : Feature
 		WaveHeight = 7,
 		WaveBreaking = 8,
 		FoamMask = 9,
+		TessHeight = 10,
+		TessWorld = 11,
 	};
 
 	/** User settings, persisted to JSON. Layout mirrors the first 96 bytes of ShoreWavesSettings in SharedData.hlsli. */

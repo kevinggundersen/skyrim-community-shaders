@@ -282,9 +282,35 @@ namespace ShoreWaves
 		return Ramp(dist / 2048.0);
 	}
 
-	float3 DebugColor(ShoreData data)
+	// Tessellation diagnostics: the domain shader stores its height in TexCoord2.z and an
+	// encoding of its world XY in TexCoord2.w (non-flowmap water only).
+	float3 TessHeightDebug(float dsHeight)
+	{
+		float amp = max(SharedData::shoreWavesSettings.WaveAmplitude, 1.0);
+		float ds = saturate(0.5 + dsHeight / (2.0 * amp));
+		float mismatch = abs(dsHeight - g_wave.height) > 0.15 * amp ? 1.0 : 0.0;
+		return lerp(ds.xxx, float3(1.0, 0.0, 0.0), mismatch);
+	}
+
+	float3 TessWorldDebug(float dsCode, float2 psWorldXY)
+	{
+		float dsx = frac(dsCode);
+		float dsy = (dsCode - dsx) * 0.5;
+		float2 dsChecker = step(0.5, float2(dsx, dsy));
+		float2 psChecker = step(0.5, frac(psWorldXY / 1024.0));
+		float dsCell = abs(dsChecker.x - dsChecker.y);
+		float psCell = abs(psChecker.x - psChecker.y);
+		// Yellow/black where both stages agree on the world cell; pure red or green where they differ.
+		return float3(psCell, dsCell, 0.0);
+	}
+
+	float3 DebugColor(ShoreData data, float dsHeight, float dsCode, float2 psWorldXY)
 	{
 		uint mode = SharedData::shoreWavesSettings.DebugMode;
+		if (mode == 10)
+			return TessHeightDebug(dsHeight);
+		if (mode == 11)
+			return TessWorldDebug(dsCode, psWorldXY);
 		if (mode == 1)
 			return DepthRamp(data.depth);
 		if (mode == 2)
