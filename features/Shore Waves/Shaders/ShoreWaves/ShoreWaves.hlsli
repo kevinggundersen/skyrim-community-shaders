@@ -20,11 +20,10 @@
 Texture2D<float4> ShoreFieldTex : register(t66);
 Texture2D<float4> ShoreFoamTex : register(t67);  // R foam pattern, G breakup mask, B fine detail (tiling, see tools/make_foam_texture.py)
 
+#include "ShoreWaves/ShoreWaveModel.hlsli"
+
 namespace ShoreWaves
 {
-	static const float Gravity = 686.7;  // 9.81 m/s^2 in game units (70 units per metre)
-	static const float TwoPi = 6.28318530718;
-
 	struct ShoreData
 	{
 		float depth;       // Screen-space vertical water depth in game units (water surface Z minus scene Z).
@@ -36,22 +35,6 @@ namespace ShoreWaves
 		float fieldDepth;  // Field bathymetry: water height minus seabed height, positive in water.
 		float fieldValid;  // 1 where the field has terrain data for this position.
 	};
-
-	struct WaveData
-	{
-		float active;     // 1 when the wave model contributed to this pixel
-		float height;     // surface height offset in game units (mean zero)
-		float2 slope;     // dh/dx, dh/dy in world XY
-		float breaking;   // 0..1, 1 where the crest is at the breaking limit
-		float fade;       // depth fade applied
-		float foam;       // 0..1 foam source from breaking crests and their trailing wash
-		float crest;      // 0..1 crest profile of the dominant train, for crest translucency
-	};
-
-	// Minimum seabed slope assumed near the waterline: the baked bathymetry is bilinear across
-	// 256-unit texels, so its zero crossing sits metres out from the true shoreline. The signed
-	// distance is exact there, so depth is never allowed below slope * distance.
-	static const float MinShoreSlope = 0.06;
 
 	// Per-invocation results consumed by GetWaterNormal, set by PrepareWaveSurface in main().
 	static WaveData g_wave = (WaveData)0;
@@ -107,26 +90,11 @@ namespace ShoreWaves
 
 	void SampleField(float2 worldXY, out float dist, out float2 dir, out float depth, out float valid)
 	{
-		dist = 0.0;
-		dir = 0.0.xx;
-		depth = 0.0;
-		valid = 0.0;
-		if (!SharedData::shoreWavesSettings.FieldValid)
-			return;
-
-		float2 extent = SharedData::shoreWavesSettings.FieldSize * SharedData::shoreWavesSettings.FieldTexelSize;
-		float2 uv = (worldXY - SharedData::shoreWavesSettings.FieldOrigin) / extent;
-		if (any(uv < 0.0) || any(uv > 1.0))
-			return;
-
-		float4 texel = ShoreFieldTex.SampleLevel(LinearSampler, uv, 0);
-		// Valid texels store bathymetry in [-0.5, 0.5]; no-data texels store -1. Bilinear blends
-		// toward -1 next to a no-data edge, so anything below -0.75 had a no-data majority.
-		valid = texel.w > -0.75 ? 1.0 : 0.0;
-		dist = texel.x * SharedData::shoreWavesSettings.FieldMaxRange;
-		depth = texel.w * 2.0 * SharedData::shoreWavesSettings.FieldBathyRange;
-		float len = length(texel.yz);
-		dir = len > 0.05 ? texel.yz / len : 0.0.xx;
+		FieldSample f = SampleShoreField(ShoreFieldTex, LinearSampler, worldXY);
+		dist = f.dist;
+		dir = f.dir;
+		depth = f.depth;
+		valid = f.valid;
 	}
 
 	ShoreData GetShoreData(float3 waterPositionWS, float2 screenPosition, float2 screenUV)
@@ -137,101 +105,6 @@ namespace ShoreWaves
 		data.fade = saturate(1.0 - data.depth / max(SharedData::shoreWavesSettings.MaxDepth, 1.0));
 		SampleField(waterPositionWS.xy + FrameBuffer::CameraPosAdjust.xy, data.fieldDist, data.fieldDir, data.fieldDepth, data.fieldValid);
 		return data;
-	}
-
-	// ---------------------------------------------------------------- Wave model
-
-	// One wave train at a point `dist` units from shore over seabed depth `depth`.
-	// Phase: with the seabed rising linearly from the shore to this point, the integral of the
-	// local wavenumber k(s) = w / sqrt(g d(s)) from the shore to here is 2 k dist, so crests are
-	// spaced by the local wavelength yet stay continuous across changes in depth.
-	// Amplitude: Green's law (d^-1/4) about RefDepth, capped at 0.39 d (breaking ratio 0.78).
-	void EvaluateTrain(float dist, float depth, float t, float period, float ampScale, float phaseOffset, float noisePhase,
-		out float h, out float dhdDist, out float breakingRatio, out float foam)
-	{
-		float d = max(depth, SharedData::shoreWavesSettings.MinDepth);
-		float omega = TwoPi / period;
-		float k = omega / sqrt(Gravity * d);
-
-		float amp = SharedData::shoreWavesSettings.WaveAmplitude * ampScale * rsqrt(sqrt(d / max(SharedData::shoreWavesSettings.RefDepth, 1.0)));  // d^-1/4, Green's law
-		float ampCap = 0.39 * d;
-		breakingRatio = amp / max(ampCap, 1e-3);
-		amp = min(amp, ampCap);
-
-		// + k dist: a crest of constant phase moves toward smaller dist, i.e. toward land.
-		float ph = 2.0 * k * dist + omega * t + phaseOffset + noisePhase;
-		float sn = sin(ph) * 0.5 + 0.5;
-		float sharp = SharedData::shoreWavesSettings.WaveSharpness;
-		float p = pow(sn, sharp);
-		h = amp * (p - 0.5);
-		float dpdph = sharp * pow(max(sn, 1e-4), sharp - 1.0) * 0.5 * cos(ph);
-		dhdDist = amp * dpdph * 2.0 * k;
-
-		// Foam: the crest itself where it is breaking, plus a wash that trails it. Phase grows with
-		// time at a fixed point, so the fraction of a period since the last crest (crest at
-		// phase pi/2) gives the age of the wash directly.
-		// Only crests at or past the breaking limit foam; the crest term is narrower than the
-		// height profile so foam rides the very top, and the wash is weaker than the crest.
-		float breakingFactor = saturate((breakingRatio - 0.85) / 0.3);
-		float sinceCrest = frac((ph - 1.5707963) / TwoPi) * period;
-		float wash = exp(-sinceCrest / max(SharedData::shoreWavesSettings.FoamDecay, 0.1));
-		float crest = pow(sn, sharp * 2.0);
-		foam = breakingFactor * max(crest, 0.7 * wash);
-	}
-
-	WaveData EvaluateWaves(ShoreData sd, float2 worldXY, float t)
-	{
-		WaveData w = (WaveData)0;
-		if (!SharedData::shoreWavesSettings.Enabled || sd.fieldValid < 0.5)
-			return w;
-		// The water mesh can extend a little past the field's shoreline; keep waves alive there so
-		// the foam has no hard edge, and let the mesh itself end the effect.
-		float dist = max(sd.fieldDist, 4.0);
-		if (sd.fieldDist < -192.0)
-			return w;
-		float depth = max(max(sd.fieldDepth, 0.0), dist * MinShoreSlope);
-
-		float fade = saturate(1.0 - depth / max(SharedData::shoreWavesSettings.MaxDepth, 1.0));
-		fade *= fade;
-		if (fade <= 0.0)
-			return w;
-
-		float noisePhase = 0.0;
-		if (SharedData::shoreWavesSettings.NoiseStrength > 0.0) {
-			float3 p = float3(worldXY * SharedData::shoreWavesSettings.NoiseScale, t * 0.03);
-			noisePhase = Random::perlinNoise(p) * SharedData::shoreWavesSettings.NoiseStrength * TwoPi;
-		}
-
-		// period multiplier, amplitude weight, phase offset
-		const float3 trains[3] = { float3(1.00, 1.00, 0.0), float3(0.83, 0.55, 2.1), float3(1.31, 0.40, 4.4) };
-		uint count = clamp(SharedData::shoreWavesSettings.WaveTrains, 1u, 3u);
-
-		float h = 0.0, dh = 0.0, breaking = 0.0, weight = 0.0, foam = 0.0, crest = 0.0;
-		[unroll] for (uint i = 0; i < 3; i++)
-		{
-			if (i < count) {
-				float hi, dhi, bri, fi;
-				EvaluateTrain(dist, depth, t, SharedData::shoreWavesSettings.WavePeriod * trains[i].x,
-					trains[i].y, trains[i].z, noisePhase * (i == 0 ? 1.0 : 0.6), hi, dhi, bri, fi);
-				crest = max(crest, saturate(hi / max(abs(hi) + 1e-3, 1e-3)) * trains[i].y * saturate(bri));
-				h += hi;
-				dh += dhi;
-				breaking = max(breaking, bri * trains[i].y);
-				foam = max(foam, fi * trains[i].y * trains[i].y);  // secondary trains are smaller and foam less
-				weight += trains[i].y;
-			}
-		}
-
-		float scale = fade * SharedData::shoreWavesSettings.Intensity / max(weight, 1e-3);
-		w.active = 1.0;
-		w.height = h * scale;
-		// d(dist)/d(xy) = -fieldDir (distance shrinks toward land)
-		w.slope = -dh * scale * sd.fieldDir;
-		w.breaking = saturate((breaking - 0.7) / 0.3) * fade;
-		w.fade = fade;
-		w.foam = foam * sqrt(fade) * SharedData::shoreWavesSettings.Intensity;
-		w.crest = crest * fade * SharedData::shoreWavesSettings.Intensity;
-		return w;
 	}
 
 	// Evaluates the wave at this pixel and stores the parallax offset and normal for GetWaterNormal.
@@ -249,7 +122,12 @@ namespace ShoreWaves
 		// The breakup mask drifts toward land at a fraction of the wave speed.
 		g_foamMaskUV = (worldXY + sd.fieldDir * (t * 45.0)) / (foamScale * FoamMaskScaleRatio);
 
-		g_wave = EvaluateWaves(sd, worldXY, t);
+		FieldSample f;
+		f.dist = sd.fieldDist;
+		f.dir = sd.fieldDir;
+		f.depth = sd.fieldDepth;
+		f.valid = sd.fieldValid;
+		g_wave = EvaluateWaves(f, worldXY, t);
 		if (g_wave.active < 0.5)
 			return;
 
@@ -258,6 +136,8 @@ namespace ShoreWaves
 		float3 v = normalize(waterPositionWS);
 		float viewDown = max(-v.z, 0.15);
 		g_waveParallaxOffset = -g_wave.height * (v.xy / viewDown) * SharedData::shoreWavesSettings.ParallaxScale;
+		if (SharedData::shoreWavesSettings.TessellationActive)
+			g_waveParallaxOffset = 0.0.xx;
 
 		float2 s = g_wave.slope * SharedData::shoreWavesSettings.NormalStrength;
 		g_waveNormal = normalize(float3(-s, 1.0));

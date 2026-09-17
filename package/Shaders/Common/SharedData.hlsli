@@ -370,13 +370,17 @@ namespace SharedData
 		float FoamSoftness;    // threshold softness of the foam pattern
 		float FoamBrightness;  // foam albedo multiplier
 		float CrestGlow;       // crest translucency strength
-		float3 pad0;
+		uint EnableTessellation;
+		float MaxTessFactor;   // subdivisions per patch edge at the waterline next to the camera
+		float TessDistance;    // camera distance (units) at which tessellation has fallen to 1
 		float2 FieldOrigin;    // world XY of the min corner of field texel (0, 0)
 		float2 FieldSize;      // field dimensions in texels
 		float FieldTexelSize;  // world units per texel
 		float FieldMaxRange;   // world units represented by a stored distance of 1.0
 		uint FieldValid;       // 1 when a field texture is bound for the active worldspace
 		float FieldBathyRange; // world units represented by a stored bathymetry of 0.5
+		uint TessellationActive;  // 1 when water draws are being tessellated this frame
+		float3 pad1;
 	};
 
 	cbuffer FeatureData : register(b6)

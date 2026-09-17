@@ -2360,6 +2360,19 @@ namespace SIE
 		isDump = value;
 	}
 
+	std::vector<std::pair<const char*, const char*>> ShaderCache::GetWaterShaderDefinesForDescriptor(uint32_t descriptor)
+	{
+		std::array<D3D_SHADER_MACRO, 128> macros{};
+		SShaderCache::GetWaterShaderDefines(descriptor, macros);
+		std::vector<std::pair<const char*, const char*>> result;
+		for (const auto& macro : macros) {
+			if (!macro.Name)
+				break;
+			result.emplace_back(macro.Name, macro.Definition);
+		}
+		return result;
+	}
+
 	bool ShaderCache::IsDiskCache() const
 	{
 		return isDiskCache;

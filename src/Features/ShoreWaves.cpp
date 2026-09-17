@@ -2,7 +2,9 @@
 
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "ShaderCache.h"
 #include "State.h"
+#include "Utils/D3D.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
 
@@ -32,7 +34,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ShoreFoamWidth,
 	FoamSoftness,
 	FoamBrightness,
-	CrestGlow)
+	CrestGlow,
+	EnableTessellation,
+	MaxTessFactor,
+	TessDistance)
 
 void ShoreWaves::DrawSettings()
 {
@@ -101,7 +106,7 @@ void ShoreWaves::DrawSettings()
 
 	ImGui::SliderFloat(T(TKEY("parallax_scale"), "Parallax"), &settings.ParallaxScale, 0.0f, 3.0f, "%.2f");
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		ImGui::Text("%s", T(TKEY("parallax_scale_tooltip"), "How far the wave height shifts the water detail under the camera. 0 disables the height cue."));
+		ImGui::Text("%s", T(TKEY("parallax_scale_tooltip"), "How far the wave height shifts the water detail under the camera when the surface is flat. Unused while tessellation is active."));
 	}
 
 	ImGui::SliderFloat(T(TKEY("normal_strength"), "Normal Strength"), &settings.NormalStrength, 0.0f, 3.0f, "%.2f");
@@ -111,8 +116,29 @@ void ShoreWaves::DrawSettings()
 
 	ImGui::SliderFloat(T(TKEY("crest_glow"), "Crest Translucency"), &settings.CrestGlow, 0.0f, 1.0f, "%.2f");
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		ImGui::Text("%s", T(TKEY("crest_glow_tooltip"), "Lightens and greens the top of each crest as if lit through, strongest with the sun behind the wave."));
+		ImGui::Text("%s", T(TKEY("crest_glow_tooltip"), "Lightens the top of each crest as if lit through, strongest with the sun behind the wave."));
 	}
+
+	ImGui::SeparatorText(T(TKEY("tess_header"), "Tessellation"));
+
+	ImGui::Checkbox(T(TKEY("enable_tessellation"), "Displace Water Surface"), (bool*)&settings.EnableTessellation);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("enable_tessellation_tooltip"),
+							  "Subdivides the water mesh near the shore and lifts it with the waves, so crests get real\n"
+							  "silhouettes instead of shading alone. Off falls back to the flat, parallax-shaded surface."));
+	}
+
+	ImGui::SliderFloat(T(TKEY("max_tess_factor"), "Max Subdivision"), &settings.MaxTessFactor, 1.0f, 64.0f, "%.0f");
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("max_tess_factor_tooltip"), "Subdivisions per patch edge at the waterline next to the camera. Higher is smoother and costs more triangles."));
+	}
+
+	ImGui::SliderFloat(T(TKEY("tess_distance"), "Subdivision Distance"), &settings.TessDistance, 1000.0f, 20000.0f, "%.0f units");
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("tess_distance_tooltip"), "Camera distance at which subdivision has fallen back to flat patches."));
+	}
+
+	ImGui::Text("%s: %u", T(TKEY("tess_draws"), "Tessellated water draws last frame"), tessellatedDrawsShown);
 
 	ImGui::SeparatorText(T(TKEY("foam_header"), "Foam"));
 
@@ -128,7 +154,7 @@ void ShoreWaves::DrawSettings()
 
 	ImGui::SliderFloat(T(TKEY("shore_foam_width"), "Waterline Foam"), &settings.ShoreFoamWidth, 0.0f, 100.0f, "%.0f units");
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		ImGui::Text("%s", T(TKEY("shore_foam_width_tooltip"), "Depth below which the constant waterline foam band appears. Uses the depth buffer, so it also hugs rocks and hulls."));
+		ImGui::Text("%s", T(TKEY("shore_foam_width_tooltip"), "Depth band of the waterline foam. It peaks at half this depth and is zero at the waterline itself. Uses the depth buffer, so it also hugs rocks and hulls."));
 	}
 
 	ImGui::SliderFloat(T(TKEY("foam_scale"), "Foam Texture Scale"), &settings.FoamScale, 64.0f, 1024.0f, "%.0f units");
@@ -227,6 +253,11 @@ void ShoreWaves::RestoreDefaultSettings()
 	settings = {};
 }
 
+bool ShoreWaves::IsTessellationActive() const
+{
+	return loaded && settings.Enabled && settings.EnableTessellation && shoreField.IsReady() && drawHookInstalled;
+}
+
 ShoreWaves::PerFrame ShoreWaves::GetCommonBufferData() const
 {
 	PerFrame data{};
@@ -235,6 +266,7 @@ ShoreWaves::PerFrame ShoreWaves::GetCommonBufferData() const
 		data.settings.Enabled = 0;
 	data.settings.WaveSharpness = std::max(data.settings.WaveSharpness, 1.0f);
 	data.settings.WaveTrains = std::clamp(data.settings.WaveTrains, 1u, 3u);
+	data.settings.MaxTessFactor = std::clamp(data.settings.MaxTessFactor, 1.0f, 64.0f);
 
 	if (shoreField.IsReady()) {
 		const auto& hdr = shoreField.GetActiveHeader();
@@ -245,6 +277,7 @@ ShoreWaves::PerFrame ShoreWaves::GetCommonBufferData() const
 		data.FieldValid = 1;
 		data.FieldBathyRange = ShoreField::kBathyRange;
 	}
+	data.TessellationActive = IsTessellationActive() ? 1u : 0u;
 	return data;
 }
 
@@ -259,6 +292,142 @@ void ShoreWaves::SetupResources()
 	} else {
 		Util::SetResourceName(foamView.get(), "ShoreWaves::FoamTexture SRV");
 	}
+
+	{
+		D3D11_SAMPLER_DESC samplerDesc{};
+		samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+		samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+		samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		samplerDesc.MaxAnisotropy = 1;
+		samplerDesc.MinLOD = 0;
+		samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+		if (SUCCEEDED(device->CreateSamplerState(&samplerDesc, tessSampler.put())) && tessSampler) {
+			Util::SetResourceName(tessSampler.get(), "ShoreWaves::FieldSampler");
+		} else {
+			logger::error("[Shore Waves] Failed to create the field sampler; tessellation disabled");
+		}
+	}
+
+	if (!drawHookInstalled && context && tessSampler) {
+		// Patches the DrawIndexed implementation itself (Detours), so every context shares it;
+		// the thunk only acts on the immediate context with a flagged water draw.
+		stl::detour_vfunc<12, ID3D11DeviceContext_DrawIndexed>(context);
+		drawHookInstalled = true;
+		logger::info("[Shore Waves] Installed DrawIndexed hook for water tessellation");
+	}
+}
+
+void ShoreWaves::PostPostLoad()
+{
+	stl::write_vfunc<0x6, BSWaterShader_SetupGeometry>(RE::VTABLE_BSWaterShader[0]);
+	logger::info("[Shore Waves] Installed hooks");
+}
+
+void ShoreWaves::ClearShaderCache()
+{
+	tessellationShaders.clear();
+}
+
+ShoreWaves::TessellationShaders* ShoreWaves::GetTessellationShaders(uint32_t vertexDescriptor)
+{
+	auto it = tessellationShaders.find(vertexDescriptor);
+	if (it != tessellationShaders.end())
+		return &it->second;
+
+	TessellationShaders stages;
+	const auto defines = SIE::ShaderCache::GetWaterShaderDefinesForDescriptor(vertexDescriptor);
+
+	if (auto* hull = reinterpret_cast<ID3D11HullShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", defines, "hs_5_0")))
+		stages.hull.attach(hull);
+	if (auto* domain = reinterpret_cast<ID3D11DomainShader*>(Util::CompileShader(L"Data\\Shaders\\Water.hlsl", defines, "ds_5_0")))
+		stages.domain.attach(domain);
+
+	stages.failed = !stages.hull || !stages.domain;
+	if (stages.failed) {
+		logger::error("[Shore Waves] Hull/domain shader compilation failed for water descriptor {:#x}; that permutation stays flat", vertexDescriptor);
+		stages.hull = nullptr;
+		stages.domain = nullptr;
+	} else {
+		logger::info("[Shore Waves] Compiled tessellation shaders for water descriptor {:#x}", vertexDescriptor);
+	}
+
+	return &tessellationShaders.emplace(vertexDescriptor, std::move(stages)).first->second;
+}
+
+void ShoreWaves::BSWaterShader_SetupGeometry::thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t flags)
+{
+	auto& self = globals::features::shoreWaves;
+	self.pendingTessellation = false;
+
+	if (self.IsTessellationActive() && pass && pass->geometry && globals::state->currentShader == shader) {
+		using Flags = SIE::ShaderCache::WaterShaderFlags;
+		const uint32_t descriptor = globals::state->modifiedVertexDescriptor;
+		const uint32_t technique = (descriptor >> 11) & 0xF;
+		const bool mainTechnique = technique == 0;  // SPECULAR with no point lights: the normal water pass
+		const bool hasDepth = descriptor & static_cast<uint32_t>(Flags::Depth);
+		const bool fakeDepth = descriptor & static_cast<uint32_t>(Flags::VertexAlphaDepth);
+		const bool flowmap = descriptor & static_cast<uint32_t>(Flags::Flowmap);
+		const bool interior = descriptor & static_cast<uint32_t>(Flags::Interior);
+
+		if (mainTechnique && hasDepth && !fakeDepth && !flowmap && !interior) {
+			const auto& bound = pass->geometry->worldBound;
+			const float distance = bound.center.GetDistance(Util::GetEyePosition()) - bound.radius;
+			if (distance < self.settings.TessDistance) {
+				self.pendingTessellation = true;
+				self.pendingDescriptor = descriptor;
+			}
+		}
+	}
+
+	func(shader, pass, flags);
+}
+
+void WINAPI ShoreWaves::ID3D11DeviceContext_DrawIndexed::thunk(ID3D11DeviceContext* This, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
+{
+	auto& self = globals::features::shoreWaves;
+
+	if (self.pendingTessellation && This == globals::d3d::context) {
+		auto* shader = globals::state->currentShader;
+		if (shader && shader->shaderType.get() == RE::BSShader::Type::Water) {
+			auto* stages = self.GetTessellationShaders(self.pendingDescriptor);
+			if (stages && !stages->failed) {
+				// The domain shader re-projects with the vertex stage's own PerGeometry buffer and
+				// reads the shared per-frame data, so mirror those bindings for this draw.
+				ID3D11Buffer* geometryBuffers[3] = {};
+				ID3D11Buffer* perFrame = nullptr;
+				This->VSGetConstantBuffers(0, 3, geometryBuffers);
+				This->VSGetConstantBuffers(12, 1, &perFrame);
+				This->DSSetConstantBuffers(0, 3, geometryBuffers);
+				This->DSSetConstantBuffers(12, 1, &perFrame);
+				This->HSSetConstantBuffers(12, 1, &perFrame);
+
+				D3D11_PRIMITIVE_TOPOLOGY previousTopology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+				This->IAGetPrimitiveTopology(&previousTopology);
+
+				This->HSSetShader(stages->hull.get(), nullptr, 0);
+				This->DSSetShader(stages->domain.get(), nullptr, 0);
+				This->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+
+				func(This, IndexCount, StartIndexLocation, BaseVertexLocation);
+
+				This->IASetPrimitiveTopology(previousTopology);
+				This->HSSetShader(nullptr, nullptr, 0);
+				This->DSSetShader(nullptr, nullptr, 0);
+
+				for (auto* buffer : geometryBuffers)
+					if (buffer)
+						buffer->Release();
+				if (perFrame)
+					perFrame->Release();
+
+				self.tessellatedDraws++;
+				return;
+			}
+		}
+	}
+
+	func(This, IndexCount, StartIndexLocation, BaseVertexLocation);
 }
 
 void ShoreWaves::Prepass()
@@ -270,8 +439,23 @@ void ShoreWaves::Prepass()
 	}
 	shoreField.Update(worldSpace);
 
+	tessellatedDrawsShown = tessellatedDraws;
+	tessellatedDraws = 0;
+	pendingTessellation = false;
+
 	auto context = globals::d3d::context;
 	ID3D11ShaderResourceView* srvs[2] = { shoreField.GetSRV(), foamView.get() };
 	static_assert(kFoamTextureSlot == kFieldTextureSlot + 1, "field and foam slots must be adjacent");
 	context->PSSetShaderResources(kFieldTextureSlot, 2, srvs);
+
+	// Hull and domain stages read the field and the shared data; nothing else uses those stages.
+	ID3D11ShaderResourceView* fieldSRV = shoreField.GetSRV();
+	context->HSSetShaderResources(kFieldTextureSlot, 1, &fieldSRV);
+	context->DSSetShaderResources(kFieldTextureSlot, 1, &fieldSRV);
+	ID3D11SamplerState* sampler = tessSampler.get();
+	context->HSSetSamplers(kTessSamplerSlot, 1, &sampler);
+	context->DSSetSamplers(kTessSamplerSlot, 1, &sampler);
+	ID3D11Buffer* sharedBuffers[2] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
+	context->HSSetConstantBuffers(5, 2, sharedBuffers);
+	context->DSSetConstantBuffers(5, 2, sharedBuffers);
 }

@@ -450,6 +450,13 @@ namespace SIE
 		std::string GetShaderStatsString(bool a_timeOnly = false, bool a_elapsedOnly = false);
 
 		RE::BSGraphics::VertexShader* GetVertexShader(const RE::BSShader& shader, uint32_t descriptor);
+
+		/**
+		 * @brief Returns the preprocessor defines the Water shader is compiled with for a descriptor,
+		 * including loaded feature defines. Used by features that compile extra stages (hull/domain)
+		 * that must match the vertex shader's VS_OUTPUT layout.
+		 */
+		static std::vector<std::pair<const char*, const char*>> GetWaterShaderDefinesForDescriptor(uint32_t descriptor);
 		RE::BSGraphics::PixelShader* GetPixelShader(const RE::BSShader& shader,
 			uint32_t descriptor);
 		RE::BSGraphics::ComputeShader* GetComputeShader(const RE::BSShader& shader,

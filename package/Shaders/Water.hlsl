@@ -298,6 +298,118 @@ VS_OUTPUT main(VS_INPUT input)
 
 #	endif
 
+#	if defined(SHORE_WAVES) && (defined(HULLSHADER) || defined(DOMAINSHADER))
+// Shore Waves tessellation. The ShoreWaves feature draws the main water technique as
+// 3-control-point patches: the hull shader subdivides near the shore and the camera, and the
+// domain shader displaces the surface with the same wave function the pixel shader shades
+// with, so crests get real silhouettes. These stages are compiled with the vertex shader's
+// permutation defines so VS_OUTPUT matches; every other permutation is untouched.
+Texture2D<float4> ShoreFieldTessTex : register(t66);
+SamplerState ShoreFieldTessSampler : register(s0);
+#		include "ShoreWaves/ShoreWaveModel.hlsli"
+
+struct ShoreHullConstants
+{
+	float edges[3] : SV_TessFactor;
+	float inside : SV_InsideTessFactor;
+};
+
+float ShoreVertexTessFactor(float3 waterPositionWS)
+{
+	ShoreWaves::FieldSample f = ShoreWaves::SampleShoreField(ShoreFieldTessTex, ShoreFieldTessSampler, waterPositionWS.xy + FrameBuffer::CameraPosAdjust.xy);
+	return ShoreWaves::TessellationFactor(waterPositionWS, f);
+}
+#	endif
+
+#	if defined(SHORE_WAVES) && defined(HULLSHADER)
+ShoreHullConstants ShoreWavesPatchConstants(InputPatch<VS_OUTPUT, 3> patch)
+{
+	ShoreHullConstants c;
+	float f0 = ShoreVertexTessFactor(patch[0].WPosition.xyz);
+	float f1 = ShoreVertexTessFactor(patch[1].WPosition.xyz);
+	float f2 = ShoreVertexTessFactor(patch[2].WPosition.xyz);
+	// Edge i is opposite control point i; taking the max of its two endpoints keeps shared edges
+	// identical between neighbouring patches.
+	c.edges[0] = max(f1, f2);
+	c.edges[1] = max(f2, f0);
+	c.edges[2] = max(f0, f1);
+	c.inside = max(f0, max(f1, f2));
+	return c;
+}
+
+[domain("tri")]
+[partitioning("fractional_odd")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("ShoreWavesPatchConstants")]
+VS_OUTPUT main(InputPatch<VS_OUTPUT, 3> patch, uint id : SV_OutputControlPointID)
+{
+	return patch[id];
+}
+#	endif
+
+#	if defined(SHORE_WAVES) && defined(DOMAINSHADER)
+// Same layout as the vertex shader's PerGeometry buffer; the feature binds the vertex stage's
+// buffers to the domain stage for the tessellated draw.
+cbuffer PerGeometry : register(b2)
+{
+	row_major float4x4 World : packoffset(c0);
+	row_major float4x4 PreviousWorld : packoffset(c4);
+	row_major float4x4 WorldViewProj : packoffset(c8);
+	float3 ObjectUV : packoffset(c12);
+	float4 CellTexCoordOffset : packoffset(c13);
+};
+
+[domain("tri")]
+VS_OUTPUT main(ShoreHullConstants constants, float3 bary : SV_DomainLocation, const OutputPatch<VS_OUTPUT, 3> patch)
+{
+	VS_OUTPUT o = (VS_OUTPUT)0;
+#		define SHORE_INTERP(field) o.field = patch[0].field * bary.x + patch[1].field * bary.y + patch[2].field * bary.z
+	SHORE_INTERP(HPosition);
+	SHORE_INTERP(WPosition);
+	SHORE_INTERP(TexCoord1);
+	SHORE_INTERP(TexCoord2);
+#		if defined(WADING) || (defined(FLOWMAP) && (defined(REFRACTIONS) || defined(BLEND_NORMALS))) || (defined(VERTEX_ALPHA_DEPTH) && defined(VC)) || ((defined(SPECULAR) && NUM_SPECULAR_LIGHTS == 0) && defined(FLOWMAP))
+	SHORE_INTERP(TexCoord3);
+#		endif
+#		if defined(FLOWMAP)
+	o.TexCoord4 = patch[0].TexCoord4;
+#		endif
+#		if NUM_SPECULAR_LIGHTS == 0
+	SHORE_INTERP(MPosition);
+#		endif
+#		if !defined(UNIFIED_WATER)
+	SHORE_INTERP(FogParam);
+#		endif
+	o.NormalsScale = patch[0].NormalsScale;
+#		undef SHORE_INTERP
+
+	// Displace along world Z by the wave height. WPosition is camera-relative world space;
+	// MPosition is model space, so the same offset is divided by the model's Z scale before
+	// re-projecting with the game's own WorldViewProj, which keeps TAA jitter consistent with
+	// every other draw.
+	float2 worldXY = o.WPosition.xy + FrameBuffer::CameraPosAdjust.xy;
+	ShoreWaves::FieldSample f = ShoreWaves::SampleShoreField(ShoreFieldTessTex, ShoreFieldTessSampler, worldXY);
+	ShoreWaves::WaveData w = ShoreWaves::EvaluateWaves(f, worldXY, SharedData::Timer);
+	float h = w.active > 0.5 ? w.height : 0.0;
+
+	o.WPosition.z += h;
+	o.WPosition.w = length(o.WPosition.xyz);
+
+	float scaleZ = max(length(float3(World[0][2], World[1][2], World[2][2])), 1e-4);
+	float4 modelPosition = float4(o.MPosition.xyz + float3(0.0, 0.0, h / scaleZ), 1.0);
+	float4 worldViewPos = mul(WorldViewProj, modelPosition);
+	float heightMult = min((1.0 / 10000.0) * max(worldViewPos.z - 70000, 0), 1);
+	o.HPosition.xy = worldViewPos.xy;
+	o.HPosition.z = heightMult * 0.5 + worldViewPos.z;
+	o.HPosition.w = worldViewPos.w;
+#		if defined(HORIZON_FIX)
+	o.HPosition.z = min(o.HPosition.z, o.HPosition.w * HorizonFix::FoldedDepth);
+#		endif
+	return o;
+}
+#	endif
+
 typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
