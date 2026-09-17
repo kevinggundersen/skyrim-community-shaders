@@ -392,13 +392,15 @@ void WINAPI ShoreWaves::ID3D11DeviceContext_DrawIndexed::thunk(ID3D11DeviceConte
 		if (shader && shader->shaderType.get() == RE::BSShader::Type::Water) {
 			auto* stages = self.GetTessellationShaders(self.pendingDescriptor);
 			if (stages && !stages->failed) {
-				// The domain shader re-projects with the vertex stage's own PerGeometry buffer and
-				// reads the shared per-frame data, so mirror those bindings for this draw.
+				// The domain shader re-projects with the vertex stage's own PerGeometry buffer, so
+				// mirror b0-b2 for this draw. The camera data (FrameBuffer, b12) is the engine's
+				// PerFrame buffer, which the vertex stage does not carry at slot 12: bind the engine's
+				// object directly, as the deferred passes do for compute. Reading it from the vertex
+				// stage left CameraPosAdjust at zero and the waves followed the camera.
 				ID3D11Buffer* geometryBuffers[3] = {};
-				ID3D11Buffer* perFrame = nullptr;
 				This->VSGetConstantBuffers(0, 3, geometryBuffers);
-				This->VSGetConstantBuffers(12, 1, &perFrame);
 				This->DSSetConstantBuffers(0, 3, geometryBuffers);
+				ID3D11Buffer* perFrame = *globals::game::perFrame.get();
 				This->DSSetConstantBuffers(12, 1, &perFrame);
 				This->HSSetConstantBuffers(12, 1, &perFrame);
 
@@ -418,8 +420,6 @@ void WINAPI ShoreWaves::ID3D11DeviceContext_DrawIndexed::thunk(ID3D11DeviceConte
 				for (auto* buffer : geometryBuffers)
 					if (buffer)
 						buffer->Release();
-				if (perFrame)
-					perFrame->Release();
 
 				self.tessellatedDraws++;
 				return;
